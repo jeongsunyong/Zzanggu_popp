@@ -1,0 +1,656 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title> 짱구 똥피하기 </title>
+<style>
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    background: #0b0b10;
+    color: #fff;
+    font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+  h2 {
+    margin-top: 14px;
+    font-size: 20px;
+  }
+  canvas {
+    margin-top: 10px;
+    background: radial-gradient(circle at top, #4d8cff 0, #1b2735 45%, #050608 100%);
+    border-radius: 12px;
+    border: 2px solid #ffffff33;
+    box-shadow: 0 12px 30px rgba(0,0,0,0.8);
+    touch-action: none;
+  }
+  #restart {
+    margin-top: 12px;
+    padding: 8px 16px;
+    font-size: 15px;
+    border-radius: 999px;
+    border: none;
+    cursor: pointer;
+    display: none;
+    background: linear-gradient(135deg, #ff7b7b, #ffb347);
+    color: #111;
+    font-weight: 600;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.5);
+  }
+  #restart:active {
+    transform: translateY(1px);
+    box-shadow: 0 3px 10px rgba(0,0,0,0.4);
+  }
+  #tip {
+    margin-top: 8px;
+    font-size: 13px;
+    opacity: 0.8;
+    text-align: center;
+    line-height: 1.4;
+  }
+</style>
+</head>
+<body>
+
+<h2>💩 똥피하기 – 짱구 버전</h2>
+<canvas id="game" width="400" height="600"></canvas>
+<button id="restart">다시 시작</button>
+<div id="tip">
+  ← → / A D 키 또는 화면 좌우 터치<br/>
+  ⭐ 노란 별 = 무적 / 파란 알약 = 슬로우
+</div>
+
+<script>
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const restartBtn = document.getElementById("restart");
+
+function loadSprite(src) {
+  const img = new Image();
+  img.src = src;
+  return img;
+}
+
+// ---- 오디오 (BGM) ----
+let bgmStarted = false;
+let bgm;
+try {
+  bgm = new Audio("bgm.mp3");
+  bgm.loop = true;
+} catch (e) {
+  bgm = null;
+}
+
+function tryStartBgm() {
+  if (!bgm || bgmStarted) return;
+  bgmStarted = true;
+  bgm.volume = 0.7;
+  bgm.play().catch(() => {
+  });
+}
+
+// ---- 플레이어 이미지 ----
+const playerImg = new Image();
+let playerImgLoaded = false;
+playerImg.src = "player.png";
+playerImg.onload = () => {
+  playerImgLoaded = true;
+};
+
+// ---- 게임 상태 ----
+let isGameOver = false;
+let lastTime = 0;
+let score = 0;
+let bestScore = 0;
+let timeElapsed = 0;
+
+// 화면 흔들림(shake)
+let shakeTimer = 0;
+const SHAKE_DURATION = 0.35;
+const SHAKE_MAG = 12;
+
+// 파워업 상태
+let invincibleTimer = 0;
+let slowTimer = 0;
+
+// 글로벌 속도 계수 (슬로우 아이템)
+function getSpeedFactor() {
+  return slowTimer > 0 ? 0.45 : 1.0;
+}
+
+// 플레이어
+const player = {
+  x: canvas.width / 2 - 20,
+  y: canvas.height - 90,
+  w: 50,
+  h: 70,
+  speed: 260,
+  moveDir: 0
+};
+
+// 똥 타입 3종류
+const POOP_TYPES = [
+  { 
+    name: "smallFast",
+    size: 35,
+    color: "#ffc15e",
+    speedMin: 230,
+    speedMax: 330,
+    img: loadSprite("zinsang_circle.png")
+  },
+  { 
+    name: "normal",
+    size: 42,
+    color: "#9b5b2a",
+    speedMin: 170,
+    speedMax: 250,
+    img: loadSprite("zoongseong_circle.png")
+  },
+  { 
+    name: "bigSlow",
+    size: 50,
+    color: "#5b3a1a",
+    speedMin: 110,
+    speedMax: 180,
+    img: loadSprite("osu_circle.png")
+  }
+];
+
+const BG_PHASES = [
+  { minScore: 0,   img: loadSprite("bg1.jpg") }, // 0점 이상
+  { minScore: 200, img: loadSprite("bg2.jpg") }, // 200점 이상
+  { minScore: 500, img: loadSprite("bg3.jpg") }, // 500점 이상
+];
+
+const poops = [];
+let poopTimer = 0;
+
+// 아이템 (무적 / 슬로우)
+const items = [];
+let itemTimer = 0;
+const ITEM_TYPES = [
+  { type: "invincible", color: "#ffd93b" }, // 노란 별
+  { type: "slow",       color: "#4db8ff" }  // 파란 알약 느낌
+];
+
+// 키 입력
+const keys = {
+  left: false,
+  right: false
+};
+
+// ---- 유틸 ----
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v));
+}
+
+function rectIntersect(a, b) {
+  return !(
+    a.x + a.w < b.x ||
+    a.x > b.x + b.w ||
+    a.y + a.h < b.y ||
+    a.y > b.y + b.h
+  );
+}
+function getCurrentBg() {
+  // score는 이미 전역 변수로 있으니까 그대로 사용
+  let current = BG_PHASES[0].img;
+  for (const phase of BG_PHASES) {
+    if (score >= phase.minScore) {
+      current = phase.img;
+    } else {
+      break;
+    }
+  }
+  return current;
+}
+
+// 원-사각형 충돌 (아이템용)
+function circleRectCollide(cx, cy, r, rect) {
+  const testX = clamp(cx, rect.x, rect.x + rect.w);
+  const testY = clamp(cy, rect.y, rect.y + rect.h);
+  const distX = cx - testX;
+  const distY = cy - testY;
+  const distSq = distX * distX + distY * distY;
+  return distSq <= r * r;
+}
+
+// ---- 똥 생성 ----
+function spawnPoop() {
+  // 타입 랜덤, 약간 가중치
+  const r = Math.random();
+  let t;
+  if (r < 0.4) t = POOP_TYPES[1];          // 일반
+  else if (r < 0.7) t = POOP_TYPES[0];     // 작은/빠른
+  else t = POOP_TYPES[2];                  // 큰/느린
+
+  const size = t.size;
+  const base = t.speedMin + Math.random() * (t.speedMax - t.speedMin);
+  const speed = (base + timeElapsed * 6) * getSpeedFactor();
+
+  poops.push({
+    x: Math.random() * (canvas.width - size),
+    y: -size - 20,
+    w: size,
+    h: size,
+    color: t.color,
+    speed,
+    img: t.img
+  });
+}
+
+// ---- 아이템 생성 ----
+function spawnItem() {
+  const it = ITEM_TYPES[Math.floor(Math.random() * ITEM_TYPES.length)];
+  const radius = 14;
+  const speed = (130 + Math.random() * 60) * getSpeedFactor();
+  items.push({
+    x: Math.random() * (canvas.width - radius * 2) + radius,
+    y: -40,
+    r: radius,
+    type: it.type,
+    color: it.color,
+    speed
+  });
+}
+
+// ---- 입력 처리 ----
+document.addEventListener("keydown", (e) => {
+  if (e.code === "ArrowLeft" || e.code === "KeyA") keys.left = true;
+  if (e.code === "ArrowRight" || e.code === "KeyD") keys.right = true;
+
+  if (!isGameOver) {
+    tryStartBgm();
+  }
+
+  if (isGameOver && e.code === "Space") restart();
+});
+document.addEventListener("keyup", (e) => {
+  if (e.code === "ArrowLeft" || e.code === "KeyA") keys.left = false;
+  if (e.code === "ArrowRight" || e.code === "KeyD") keys.right = false;
+});
+
+// 모바일 터치
+canvas.addEventListener("touchstart", (e) => {
+  tryStartBgm();
+  handleTouch(e);
+});
+canvas.addEventListener("touchmove", (e) => {
+  handleTouch(e);
+});
+canvas.addEventListener("touchend", () => {
+  keys.left = keys.right = false;
+});
+
+function handleTouch(e) {
+  e.preventDefault();
+  const rect = canvas.getBoundingClientRect();
+  const x = e.touches[0].clientX - rect.left;
+  if (x < canvas.width / 2) {
+    keys.left = true;
+    keys.right = false;
+  } else {
+    keys.right = true;
+    keys.left = false;
+  }
+}
+
+// ---- 업데이트 ----
+function update(dt) {
+  if (isGameOver) return;
+
+  timeElapsed += dt;
+  score = Math.floor(timeElapsed * 15);
+
+  // 파워업 타이머 감소
+  if (invincibleTimer > 0) invincibleTimer -= dt;
+  if (slowTimer > 0) slowTimer -= dt;
+  if (invincibleTimer < 0) invincibleTimer = 0;
+  if (slowTimer < 0) slowTimer = 0;
+
+  // 흔들림 타이머 감소
+  if (shakeTimer > 0) {
+    shakeTimer -= dt;
+    if (shakeTimer < 0) shakeTimer = 0;
+  }
+
+  // 플레이어 이동
+  player.moveDir = 0;
+  if (keys.left) player.moveDir -= 1;
+  if (keys.right) player.moveDir += 1;
+
+  player.x += player.moveDir * player.speed * dt;
+  player.x = clamp(player.x, 0, canvas.width - player.w);
+
+  // 똥 스폰
+  poopTimer -= dt;
+  if (poopTimer <= 0) {
+    spawnPoop();
+    const baseInterval = 0.9;
+    const minInterval = 0.25;
+    const difficulty = Math.max(minInterval, baseInterval - timeElapsed * 0.02);
+    poopTimer = difficulty;
+  }
+
+  // 아이템 스폰 (3~7초 사이 랜덤)
+  itemTimer -= dt;
+  if (itemTimer <= 0) {
+    if (Math.random() < 0.7) { // 70% 확률로 스폰
+      spawnItem();
+    }
+    itemTimer = 3 + Math.random() * 4;
+  }
+
+  // 똥 이동 & 충돌
+  for (let i = poops.length - 1; i >= 0; i--) {
+    const p = poops[i];
+    p.y += p.speed * dt;
+
+    if (p.y > canvas.height + 80) {
+      poops.splice(i, 1);
+      continue;
+    }
+
+    if (rectIntersect(player, p)) {
+      if (invincibleTimer > 0) {
+        // 무적 상태일 땐 피격만 살짝 연출하고 무시
+        shakeTimer = SHAKE_DURATION * 0.6;
+        poops.splice(i, 1);
+        continue;
+      }
+      // 진짜 피격
+      isGameOver = true;
+      shakeTimer = SHAKE_DURATION;
+      bestScore = Math.max(bestScore, score);
+      restartBtn.style.display = "inline-block";
+      break;
+    }
+  }
+
+  // 아이템 이동 & 충돌
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i];
+    it.y += it.speed * dt;
+
+    if (it.y > canvas.height + 60) {
+      items.splice(i, 1);
+      continue;
+    }
+
+    if (circleRectCollide(it.x, it.y, it.r, player)) {
+      // 효과 적용
+      if (it.type === "invincible") {
+        invincibleTimer = 4; // 4초 무적
+      } else if (it.type === "slow") {
+        slowTimer = 4;       // 4초 슬로우
+      }
+      shakeTimer = SHAKE_DURATION * 0.5;
+      items.splice(i, 1);
+    }
+  }
+}
+
+// ---- 그리기 ----
+function drawBackground() {
+  let bg = null;
+
+  // 안전하게 현재 배경 가져오기
+  try {
+    bg = getCurrentBg();
+  } catch (e) {
+    bg = null;
+  }
+
+  // 배경 이미지가 정상 로드됐는지 체크
+  const canDrawImage =
+    bg &&
+    typeof bg === "object" &&
+    bg.complete &&
+    bg.naturalWidth > 0 &&
+    bg.naturalHeight > 0;
+
+  if (canDrawImage) {
+    // 정상 이미지 → 바로 배경으로 그림
+    ctx.drawImage(bg, 0, 0, canvas.width, canvas.height);
+  } else {
+    // 이미지 로딩 전/실패 → 그라데이션 백업 배경
+    const grd = ctx.createLinearGradient(0, 0, 0, canvas.height);
+    grd.addColorStop(0, "#4d8cff");
+    grd.addColorStop(1, "#1b2735");
+    ctx.fillStyle = grd;
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+  }
+
+  // 바닥 안개/그림자 (부드럽게 보이도록)
+  const fog = ctx.createRadialGradient(
+    canvas.width / 2,
+    canvas.height,
+    40,
+    canvas.width / 2,
+    canvas.height,
+    260
+  );
+  fog.addColorStop(0, "rgba(0,0,0,0.45)");
+  fog.addColorStop(1, "rgba(0,0,0,0)");
+  ctx.fillStyle = fog;
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+}
+function drawPlayer() {
+  // 그림자
+  ctx.beginPath();
+  ctx.ellipse(
+    player.x + player.w / 2,
+    player.y + player.h + 10,
+    player.w * 0.6,
+    8,
+    0,
+    0,
+    Math.PI * 2
+  );
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fill();
+
+  if (playerImgLoaded) {
+    ctx.drawImage(playerImg, player.x, player.y, player.w, player.h);
+  } else {
+    // 기본 네모 캐릭터
+    ctx.fillStyle = "#ffb347";
+    ctx.fillRect(player.x, player.y, player.w, player.h);
+
+    // 머리
+    ctx.fillStyle = "#ffe45e";
+    ctx.fillRect(player.x, player.y - 12, player.w, 14);
+
+    // 머리띠
+    ctx.fillStyle = "#555";
+    ctx.fillRect(player.x, player.y - 4, player.w, 5);
+  }
+
+  // 무적 상태일 때 테두리/효과
+  if (invincibleTimer > 0) {
+    const alpha = 0.6 + 0.4 * Math.sin(performance.now() / 120);
+    ctx.strokeStyle = `rgba(255, 217, 59, ${alpha})`;
+    ctx.lineWidth = 4;
+    ctx.strokeRect(player.x - 4, player.y - 6, player.w + 8, player.h + 12);
+  }
+}
+
+function drawPoops() {
+  for (const p of poops) {
+    if (p.img && p.img.complete) {
+      // 이미지 준비 완료된 경우
+      ctx.drawImage(p.img, p.x, p.y, p.w, p.h);
+    } else {
+      // 이미지 없으면 기존 삼각형으로 대체
+      ctx.fillStyle = p.color || "#9b5b2a";
+      ctx.beginPath();
+      ctx.moveTo(p.x + p.w / 2, p.y);
+      ctx.lineTo(p.x + p.w, p.y + p.h);
+      ctx.lineTo(p.x, p.y + p.h);
+      ctx.closePath();
+      ctx.fill();
+    }
+  }
+}
+
+function drawItems() {
+  for (const it of items) {
+    ctx.fillStyle = it.color;
+    ctx.beginPath();
+    if (it.type === "invincible") {
+      // 별 모양
+      const spikes = 5;
+      const outer = it.r;
+      const inner = it.r * 0.5;
+      let rot = Math.PI / 2 * 3;
+      let x = it.x;
+      let y = it.y;
+      ctx.moveTo(x, y - outer);
+      for (let i = 0; i < spikes; i++) {
+        x = it.x + Math.cos(rot) * outer;
+        y = it.y + Math.sin(rot) * outer;
+        ctx.lineTo(x, y);
+        rot += Math.PI / spikes;
+
+        x = it.x + Math.cos(rot) * inner;
+        y = it.y + Math.sin(rot) * inner;
+        ctx.lineTo(x, y);
+        rot += Math.PI / spikes;
+      }
+      ctx.lineTo(it.x, it.y - outer);
+      ctx.closePath();
+      ctx.fill();
+    } else {
+      // 캡슐(알약) 모양
+      ctx.beginPath();
+      const w = it.r * 1.8;
+      const h = it.r * 2.2;
+      const x = it.x - w / 2;
+      const y = it.y - h / 2;
+      const r = w / 2;
+      ctx.moveTo(x + r, y);
+      ctx.lineTo(x + w - r, y);
+      ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+      ctx.lineTo(x + w, y + h - r);
+      ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+      ctx.lineTo(x + r, y + h);
+      ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+      ctx.lineTo(x, y + r);
+      ctx.quadraticCurveTo(x, y, x + r, y);
+      ctx.fill();
+    }
+  }
+}
+
+function drawUI() {
+  // 상단 HUD 박스
+  ctx.fillStyle = "rgba(0,0,0,0.55)";
+  ctx.fillRect(0, 0, canvas.width, 48);
+
+  ctx.font = "16px system-ui, sans-serif";
+  ctx.fillStyle = "#ffffff";
+  ctx.textBaseline = "middle";
+
+  // Score
+  ctx.textAlign = "left";
+  ctx.fillText(`Score: ${score}`, 12, 24);
+
+  // Best
+  ctx.fillStyle = "#ffd93b";
+  ctx.fillText(`Best: ${bestScore}`, 130, 24);
+
+  // 상태 표시
+  ctx.textAlign = "right";
+  let statusText = "";
+  if (invincibleTimer > 0) {
+    statusText += "무적 ";
+  }
+  if (slowTimer > 0) {
+    statusText += statusText ? "+ 슬로우" : "슬로우";
+  }
+  if (!statusText) statusText = "Normal";
+
+  ctx.fillStyle = invincibleTimer > 0 ? "#ffd93b" : (slowTimer > 0 ? "#4db8ff" : "#dddddd");
+  ctx.fillText(statusText, canvas.width - 10, 24);
+
+  // 게임 오버 오버레이
+  if (isGameOver) {
+    ctx.fillStyle = "rgba(0,0,0,0.7)";
+    ctx.fillRect(40, canvas.height / 2 - 80, canvas.width - 80, 160);
+
+    ctx.textAlign = "center";
+    ctx.fillStyle = "#ffffff";
+    ctx.font = "26px system-ui, sans-serif";
+    ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 2 - 20);
+
+    ctx.font = "18px system-ui, sans-serif";
+    ctx.fillText(`Score: ${score}`, canvas.width / 2, canvas.height / 2 + 8);
+    ctx.fillText(`Best: ${bestScore}`, canvas.width / 2, canvas.height / 2 + 32);
+    ctx.font = "14px system-ui, sans-serif";
+    ctx.fillText("Space / 버튼으로 재시작", canvas.width / 2, canvas.height / 2 + 56);
+  }
+}
+
+function draw() {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+  let offsetX = 0;
+  let offsetY = 0;
+  if (shakeTimer > 0) {
+    const t = shakeTimer / SHAKE_DURATION;
+    const intensity = SHAKE_MAG * t;
+    offsetX = (Math.random() * 2 - 1) * intensity;
+    offsetY = (Math.random() * 2 - 1) * intensity;
+  }
+
+  ctx.save();
+  ctx.translate(offsetX, offsetY);
+
+  drawBackground();
+  drawPoops();
+  drawItems();
+  drawPlayer();
+
+  ctx.restore();
+
+  drawUI();
+}
+
+// ---- 메인 루프 ----
+function loop(timestamp) {
+  if (!lastTime) lastTime = timestamp;
+  const dt = (timestamp - lastTime) / 1000;
+  lastTime = timestamp;
+
+  update(dt);
+  draw();
+
+  requestAnimationFrame(loop);
+}
+
+// ---- 재시작 ----
+function restart() {
+  isGameOver = false;
+  lastTime = 0;
+  score = 0;
+  timeElapsed = 0;
+  poops.length = 0;
+  items.length = 0;
+  poopTimer = 0;
+  itemTimer = 2;
+  invincibleTimer = 0;
+  slowTimer = 0;
+  shakeTimer = 0;
+  player.x = canvas.width / 2 - player.w / 2;
+  restartBtn.style.display = "none";
+}
+
+restartBtn.addEventListener("click", restart);
+
+// 초기화
+itemTimer = 2;
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
